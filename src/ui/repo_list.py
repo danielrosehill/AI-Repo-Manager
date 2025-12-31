@@ -31,9 +31,11 @@ from PyQt6.QtCore import (
     QTimer,
     QThread,
 )
-from PyQt6.QtGui import QAction, QPainter, QColor, QBrush, QPen, QFont, QIcon
+from PyQt6.QtGui import QAction, QPainter, QColor, QBrush, QPen, QFont, QIcon, QPixmap
 
 from ..models.repository import Repository
+
+import os
 
 if TYPE_CHECKING:
     from ..services.openrouter_service import OpenRouterService
@@ -150,75 +152,149 @@ class VisibilityDelegate(QStyledItemDelegate):
         return QSize(90, 36)
 
 
-class OpenButtonDelegate(QStyledItemDelegate):
-    """Custom delegate to render open folder button."""
+def format_relative_date(dt: datetime) -> str:
+    """Format datetime as relative date (today, yesterday, X days ago)."""
+    now = datetime.now()
+    today = now.date()
+    target_date = dt.date()
+    delta = (today - target_date).days
+
+    if delta == 0:
+        return "Today"
+    elif delta == 1:
+        return "Yesterday"
+    else:
+        return f"{delta}d ago"
+
+
+class ActionButtonsDelegate(QStyledItemDelegate):
+    """Custom delegate to render multiple action buttons (File Explorer, VS Code, Console, Claude Code)."""
+
+    # Button configuration: (callback_name, icon_file, tooltip)
+    BUTTONS = [
+        ("file_explorer", "folder-24.png", "Open in File Explorer"),
+        ("vscode", "vsc-24.png", "Open in VS Code"),
+        ("console", "terminal-24.png", "Open in Konsole"),
+        ("claude", "claude-24.png", "Open in Claude Code"),
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._click_callback = None
+        self._callbacks = {}
+        self._last_hover_index = None
+        self._last_hover_button = -1
+        self._icons: dict[str, QPixmap] = {}
+        self._load_icons()
 
-    def set_click_callback(self, callback):
-        """Set callback for button clicks."""
-        self._click_callback = callback
+    def _load_icons(self):
+        """Load icon images from the icons directory."""
+        # Find icons directory relative to this module
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        icons_dir = os.path.join(os.path.dirname(os.path.dirname(module_dir)), "icons")
+
+        for callback_name, icon_file, tooltip in self.BUTTONS:
+            icon_path = os.path.join(icons_dir, icon_file)
+            if os.path.exists(icon_path):
+                self._icons[callback_name] = QPixmap(icon_path)
+
+    def set_callback(self, name: str, callback):
+        """Set callback for a specific button."""
+        self._callbacks[name] = callback
+
+    def _get_button_rects(self, option) -> list[QRect]:
+        """Calculate button rectangles within the cell."""
+        btn_size = 24
+        spacing = 4
+        total_width = len(self.BUTTONS) * btn_size + (len(self.BUTTONS) - 1) * spacing
+        start_x = option.rect.x() + (option.rect.width() - total_width) // 2
+        y = option.rect.y() + (option.rect.height() - btn_size) // 2
+
+        rects = []
+        for i in range(len(self.BUTTONS)):
+            x = start_x + i * (btn_size + spacing)
+            rects.append(QRect(x, y, btn_size, btn_size))
+        return rects
+
+    def _get_hovered_button(self, option, pos) -> int:
+        """Return index of hovered button, or -1 if none."""
+        if pos is None:
+            return -1
+        rects = self._get_button_rects(option)
+        for i, rect in enumerate(rects):
+            if rect.contains(pos):
+                return i
+        return -1
 
     def paint(self, painter: QPainter, option, index: QModelIndex):
-        """Paint the open folder button."""
+        """Paint the action buttons."""
         repo = index.data(Qt.ItemDataRole.UserRole)
         if not repo or not repo.is_local:
-            # Show nothing for non-local repos
             return
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Button dimensions
-        btn_size = 24
-        x = option.rect.x() + (option.rect.width() - btn_size) // 2
-        y = option.rect.y() + (option.rect.height() - btn_size) // 2
+        rects = self._get_button_rects(option)
 
-        btn_rect = QRect(x, y, btn_size, btn_size)
+        for i, (callback_name, icon_file, tooltip) in enumerate(self.BUTTONS):
+            btn_rect = rects[i]
 
-        # Draw button background on hover
-        if option.state & QStyle.StateFlag.State_MouseOver:
-            painter.setBrush(QBrush(QColor("#e5e7eb")))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(btn_rect, 4, 4)
+            # Draw button background on hover
+            if option.state & QStyle.StateFlag.State_MouseOver:
+                painter.setBrush(QBrush(QColor("#f3f4f6")))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(btn_rect, 4, 4)
 
-        # Draw folder icon
-        folder_color = QColor("#007acc")
-        painter.setPen(QPen(folder_color, 1.5))
-        painter.setBrush(QBrush(folder_color.lighter(150)))
-
-        # Folder body
-        fx, fy = x + 4, y + 7
-        fw, fh = 16, 11
-        painter.drawRoundedRect(fx, fy, fw, fh, 2, 2)
-
-        # Folder tab
-        painter.setBrush(QBrush(folder_color.lighter(130)))
-        from PyQt6.QtGui import QPolygon
-        from PyQt6.QtCore import QPoint
-        tab = QPolygon([
-            QPoint(fx + 1, fy),
-            QPoint(fx + 6, fy),
-            QPoint(fx + 8, fy - 3),
-            QPoint(fx + 1, fy - 3),
-        ])
-        painter.drawPolygon(tab)
+            # Draw icon from loaded pixmap
+            if callback_name in self._icons:
+                pixmap = self._icons[callback_name]
+                painter.drawPixmap(btn_rect, pixmap)
 
         painter.restore()
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(60, 36)
+        return QSize(130, 36)
 
     def editorEvent(self, event, model, option, index):
-        """Handle click events."""
+        """Handle click events on buttons."""
         from PyQt6.QtCore import QEvent
+
         if event.type() == QEvent.Type.MouseButtonRelease:
             repo = index.data(Qt.ItemDataRole.UserRole)
-            if repo and repo.is_local and self._click_callback:
-                self._click_callback(repo)
+            if not repo or not repo.is_local:
+                return False
+
+            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            rects = self._get_button_rects(option)
+
+            for i, rect in enumerate(rects):
+                if rect.contains(pos):
+                    callback_name = self.BUTTONS[i][0]
+                    if callback_name in self._callbacks:
+                        self._callbacks[callback_name](repo)
+                        return True
+            return False
+        return False
+
+    def helpEvent(self, event, view, option, index):
+        """Show tooltip for hovered button."""
+        from PyQt6.QtWidgets import QToolTip
+
+        repo = index.data(Qt.ItemDataRole.UserRole)
+        if not repo or not repo.is_local:
+            return False
+
+        pos = event.pos()
+        rects = self._get_button_rects(option)
+
+        for i, rect in enumerate(rects):
+            if rect.contains(pos):
+                tooltip = self.BUTTONS[i][2]  # Get tooltip text
+                QToolTip.showText(event.globalPos(), tooltip, view)
                 return True
+
+        QToolTip.hideText()
         return False
 
 
@@ -262,15 +338,17 @@ class RepositoryTableModel(QAbstractTableModel):
             elif col == 1:
                 return "Private" if repo.is_private else "Public"
             elif col == 2:
-                return repo.created_at.strftime("%b %d")
+                return format_relative_date(repo.created_at)
             elif col == 3:
-                return ""  # VS Code button column
+                return ""  # Action buttons column
 
         elif role == Qt.ItemDataRole.ToolTipRole:
             if col == 0:
                 return f"{repo.full_name}\n{repo.html_url}"
+            elif col == 2:
+                return repo.created_at.strftime("%B %d, %Y")
             elif col == 3 and repo.is_local:
-                return "Open in VS Code"
+                return "Open repository"
 
         elif role == Qt.ItemDataRole.UserRole:
             return repo
@@ -496,7 +574,9 @@ class RepositoryListWidget(QWidget):
     """Widget displaying the repository list with search, pagination, and actions."""
 
     repository_selected = pyqtSignal(Repository)
-    open_requested = pyqtSignal(Repository)
+    open_requested = pyqtSignal(Repository)  # VS Code
+    open_file_explorer_requested = pyqtSignal(Repository)
+    open_console_requested = pyqtSignal(Repository)
     claude_code_requested = pyqtSignal(Repository)
     delete_requested = pyqtSignal(Repository)
     view_github_requested = pyqtSignal(Repository)
@@ -582,25 +662,30 @@ class RepositoryListWidget(QWidget):
         self.visibility_delegate = VisibilityDelegate(self)
         self.table_view.setItemDelegateForColumn(1, self.visibility_delegate)
 
-        self.open_delegate = OpenButtonDelegate(self)
-        self.open_delegate.set_click_callback(lambda repo: self.open_requested.emit(repo))
-        self.table_view.setItemDelegateForColumn(3, self.open_delegate)
+        # Action buttons delegate with File Explorer, VS Code, Console, Claude Code
+        self.action_delegate = ActionButtonsDelegate(self)
+        self.action_delegate.set_callback("file_explorer", lambda repo: self.open_file_explorer_requested.emit(repo))
+        self.action_delegate.set_callback("vscode", lambda repo: self.open_requested.emit(repo))
+        self.action_delegate.set_callback("console", lambda repo: self.open_console_requested.emit(repo))
+        self.action_delegate.set_callback("claude", lambda repo: self.claude_code_requested.emit(repo))
+        self.table_view.setItemDelegateForColumn(3, self.action_delegate)
 
-        # Configure header - Name stretches, others fixed
+        # Configure header - all fixed widths for compact layout
         header = self.table_view.horizontalHeader()
         header.setStretchLastSection(False)  # Don't stretch last column
         header.setMinimumSectionSize(60)  # Minimum width for any column
 
-        # Set resize modes - Name stretches to fill available space
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Name - stretches
+        # Set all columns to fixed width for predictable compact layout
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)    # Name - fixed
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)    # Visibility - fixed
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)    # Created date - fixed
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)    # Open button - fixed
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)    # Action buttons - fixed
 
-        # Set fixed column widths for non-stretching columns
-        header.resizeSection(1, 90)    # Visibility column
-        header.resizeSection(2, 80)    # Created date column
-        header.resizeSection(3, 60)    # Open column
+        # Set fixed column widths
+        header.resizeSection(0, 250)   # Name column - reasonable width for repo names
+        header.resizeSection(1, 80)    # Visibility column
+        header.resizeSection(2, 70)    # Created date column (relative dates are shorter)
+        header.resizeSection(3, 130)   # Action buttons column (4 buttons)
 
         header.sectionClicked.connect(self._on_header_clicked)
 
@@ -802,21 +887,31 @@ class RepositoryListWidget(QWidget):
         menu = QMenu(self)
 
         if repo.is_local:
-            open_action = QAction("Open in VS Code", self)
-            open_action.triggered.connect(lambda: self.open_requested.emit(repo))
-            menu.addAction(open_action)
+            file_explorer_action = QAction("Open in File Explorer", self)
+            file_explorer_action.triggered.connect(lambda: self.open_file_explorer_requested.emit(repo))
+            menu.addAction(file_explorer_action)
+
+            vscode_action = QAction("Open in VS Code", self)
+            vscode_action.triggered.connect(lambda: self.open_requested.emit(repo))
+            menu.addAction(vscode_action)
+
+            console_action = QAction("Open in Konsole", self)
+            console_action.triggered.connect(lambda: self.open_console_requested.emit(repo))
+            menu.addAction(console_action)
 
             claude_action = QAction("Open in Claude Code", self)
             claude_action.triggered.connect(lambda: self.claude_code_requested.emit(repo))
             menu.addAction(claude_action)
 
+            menu.addSeparator()
+
         github_action = QAction("View on GitHub", self)
         github_action.triggered.connect(lambda: self.view_github_requested.emit(repo))
         menu.addAction(github_action)
 
-        menu.addSeparator()
-
         if repo.is_local:
+            menu.addSeparator()
+
             delete_action = QAction("Delete Local Copy", self)
             delete_action.triggered.connect(lambda: self.delete_requested.emit(repo))
             menu.addAction(delete_action)

@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         """Set up the main window UI."""
         self.setWindowTitle("AI Repo Manager")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(600, 450)  # Compact size for 10 repos per page
         self.setStyleSheet(MAIN_STYLESHEET)
 
         # Central widget
@@ -200,6 +200,8 @@ class MainWindow(QMainWindow):
         # Repository list
         self.repo_list = RepositoryListWidget()
         self.repo_list.open_requested.connect(self._open_repository)
+        self.repo_list.open_file_explorer_requested.connect(self._open_in_file_explorer)
+        self.repo_list.open_console_requested.connect(self._open_in_console)
         self.repo_list.claude_code_requested.connect(self._open_in_claude_code)
         self.repo_list.delete_requested.connect(self._delete_repository)
         self.repo_list.view_github_requested.connect(self._view_on_github)
@@ -511,6 +513,51 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open repository: {e}")
+
+    def _open_in_file_explorer(self, repo: Repository):
+        """Open repository in file explorer (Dolphin on KDE)."""
+        if not repo.is_local or not repo.local_path:
+            QMessageBox.warning(
+                self,
+                "Not Local",
+                f"Repository '{repo.name}' is not cloned locally.",
+            )
+            return
+
+        try:
+            # Try Dolphin first (KDE), then fall back to xdg-open
+            subprocess.Popen(["dolphin", repo.local_path])
+            self.status_label.setText(f"Opened {repo.name} in file explorer")
+        except FileNotFoundError:
+            try:
+                subprocess.Popen(["xdg-open", repo.local_path])
+                self.status_label.setText(f"Opened {repo.name} in file explorer")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to open file explorer: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open file explorer: {e}")
+
+    def _open_in_console(self, repo: Repository):
+        """Open repository in Konsole terminal."""
+        if not repo.is_local or not repo.local_path:
+            QMessageBox.warning(
+                self,
+                "Not Local",
+                f"Repository '{repo.name}' is not cloned locally.",
+            )
+            return
+
+        try:
+            subprocess.Popen(["konsole", "--workdir", repo.local_path])
+            self.status_label.setText(f"Opened {repo.name} in Konsole")
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self,
+                "Terminal Not Found",
+                "Could not find 'konsole'. Make sure Konsole is installed.",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open terminal: {e}")
 
     def _open_in_claude_code(self, repo: Repository):
         """Open repository in Claude Code terminal."""
