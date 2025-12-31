@@ -7,10 +7,10 @@ from typing import Optional
 
 @dataclass
 class Repository:
-    """Represents a GitHub repository with local and remote status."""
+    """Represents a repository from various sources (GitHub, Hugging Face, local)."""
 
     name: str
-    full_name: str  # owner/repo format
+    full_name: str  # owner/repo format or path-based identifier
     description: Optional[str]
     created_at: datetime
     topics: list[str] = field(default_factory=list)
@@ -22,6 +22,10 @@ class Repository:
     is_embedded: bool = False
     is_private: bool = False
     default_branch: str = "main"
+
+    # Source tracking
+    source: str = "github"  # github, huggingface, work, local
+    source_subtype: Optional[str] = None  # For HF: dataset, model, space
 
     def to_embedding_text(self) -> str:
         """Generate text for embedding."""
@@ -52,6 +56,8 @@ class Repository:
             "is_local": self.is_local,
             "local_path": self.local_path or "",
             "is_private": self.is_private,
+            "source": self.source,
+            "source_subtype": self.source_subtype or "",
         }
 
     @classmethod
@@ -71,4 +77,6 @@ class Repository:
             local_path=metadata.get("local_path") or None,
             is_private=metadata.get("is_private", False),
             is_embedded=True,
+            source=metadata.get("source", "github"),
+            source_subtype=metadata.get("source_subtype") or None,
         )

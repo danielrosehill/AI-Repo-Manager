@@ -35,9 +35,10 @@ from PyQt6.QtWidgets import (
     QMenu,
     QSystemTrayIcon,
     QApplication,
+    QFrame,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QIcon, QColor
 
 from .styles import MAIN_STYLESHEET
 from .repo_list import RepositoryListWidget
@@ -51,8 +52,46 @@ from ..services.openrouter_service import OpenRouterService
 from ..services.vector_store import VectorStore
 
 
+class ApiHealthCheckWorker(QThread):
+    """Worker thread for checking API connection health."""
+
+    # Signals: (service_name, is_connected, message)
+    github_status = pyqtSignal(bool, str)
+    huggingface_status = pyqtSignal(bool, str)
+
+    def __init__(self, config: "Config"):
+        super().__init__()
+        self.config = config
+
+    def run(self):
+        """Check API connections."""
+        # Check GitHub
+        if self.config.github_pat:
+            try:
+                from ..services.github_service import GitHubService
+                service = GitHubService(self.config.github_pat, self.config.repos_base_path or "")
+                success, message = service.test_connection()
+                self.github_status.emit(success, message)
+            except Exception as e:
+                self.github_status.emit(False, str(e))
+        else:
+            self.github_status.emit(False, "Not configured")
+
+        # Check Hugging Face
+        if self.config.hf_token:
+            try:
+                from ..services.huggingface_service import HuggingFaceService
+                service = HuggingFaceService(self.config.hf_token)
+                success, message = service.test_connection()
+                self.huggingface_status.emit(success, message)
+            except Exception as e:
+                self.huggingface_status.emit(False, str(e))
+        else:
+            self.huggingface_status.emit(False, "Not configured")
+
+
 class UpdateReposWorker(QThread):
-    """Worker thread for updating repositories and embeddings."""
+    """Worker thread for updating repositories and embeddings from multiple sources."""
 
     progress = pyqtSignal(str, int, int)  # message, current, total
     stage_changed = pyqtSignal(int)  # stage number (1-indexed)
@@ -62,13 +101,13 @@ class UpdateReposWorker(QThread):
 
     def __init__(
         self,
-        github_service: GitHubService,
+        config: "Config",
         openrouter_service: OpenRouterService,
         vector_store: VectorStore,
         database: Database,
     ):
         super().__init__()
-        self.github = github_service
+        self.config = config
         self.openrouter = openrouter_service
         self.vector_store = vector_store
         self.database = database
@@ -87,18 +126,90 @@ class UpdateReposWorker(QThread):
             self.error.emit(str(e))
 
     async def _update_repos(self) -> tuple[list[Repository], int, int]:
-        """Update repositories with incremental sync."""
-
-        # Stage 1: Sync repos from GitHub to database
-        self.stage_changed.emit(1)
-        self.progress.emit("Syncing repositories from GitHub...", 0, 0)
+        """Update repositories with incremental sync from all sources."""
+        total_repos = 0
+        changed_repos = 0
 
         def progress_cb(msg, current, total):
             self.progress.emit(msg, current, total)
 
-        total_repos, changed_repos = self.github.sync_repos_to_database(
-            self.database, progress_cb
-        )
+        # Stage 1: Sync from all configured sources
+        self.stage_changed.emit(1)
+
+        # 1a: GitHub - sync from all configured GitHub paths
+        github_paths = [
+            (self.config.repos_base_path, "github"),
+            (self.config.github_public_path, "github"),
+            (self.config.github_private_path, "github"),
+        ]
+        for path, source in github_paths:
+            if self.config.github_pat and path:
+                self.progress.emit(f"Syncing repositories from GitHub ({path})...", 0, 0)
+                try:
+                    github_service = GitHubService(
+                        self.config.github_pat,
+                        path,
+                    )
+                    gh_total, gh_changed = github_service.sync_repos_to_database(
+                        self.database, progress_cb
+                    )
+                    total_repos += gh_total
+                    changed_repos += gh_changed
+                except Exception as e:
+                    self.progress.emit(f"GitHub sync error: {e}", 0, 0)
+
+        # 1b: Hugging Face - check all path slots
+        if self.config.hf_token and (
+            self.config.hf_datasets_path or self.config.hf_datasets_path_2 or
+            self.config.hf_models_path or self.config.hf_models_path_2 or
+            self.config.hf_spaces_path or self.config.hf_spaces_path_2
+        ):
+            self.progress.emit("Syncing repositories from Hugging Face...", 0, 0)
+            try:
+                from ..services.huggingface_service import HuggingFaceService
+
+                hf_service = HuggingFaceService(
+                    self.config.hf_token,
+                    datasets_path=self.config.hf_datasets_path,
+                    datasets_path_2=self.config.hf_datasets_path_2,
+                    models_path=self.config.hf_models_path,
+                    models_path_2=self.config.hf_models_path_2,
+                    spaces_path=self.config.hf_spaces_path,
+                    spaces_path_2=self.config.hf_spaces_path_2,
+                )
+                hf_total, hf_changed = hf_service.sync_repos_to_database(
+                    self.database, progress_cb
+                )
+                total_repos += hf_total
+                changed_repos += hf_changed
+            except ImportError:
+                self.progress.emit("Hugging Face: huggingface_hub not installed", 0, 0)
+            except Exception as e:
+                self.progress.emit(f"Hugging Face sync error: {e}", 0, 0)
+
+        # 1c: Local repo scans (work, forks, docs)
+        local_sources = [
+            (self.config.work_repos_path, "work", "work repositories"),
+            (self.config.forks_path, "forks", "forked repositories"),
+            (self.config.docs_path, "docs", "documentation repositories"),
+        ]
+        for path, source_name, display_name in local_sources:
+            if path:
+                self.progress.emit(f"Scanning {display_name}...", 0, 0)
+                try:
+                    from ..services.huggingface_service import LocalRepoService
+
+                    local_service = LocalRepoService(
+                        path,
+                        source_name=source_name
+                    )
+                    local_total, local_changed = local_service.sync_repos_to_database(
+                        self.database, progress_cb
+                    )
+                    total_repos += local_total
+                    changed_repos += local_changed
+                except Exception as e:
+                    self.progress.emit(f"{display_name.capitalize()} scan error: {e}", 0, 0)
 
         # Stage 2: Get repos that need embedding and fetch READMEs
         repos_to_embed = self.database.get_repos_needing_embedding()
@@ -109,13 +220,64 @@ class UpdateReposWorker(QThread):
         if embed_count > 0:
             self.progress.emit(f"Fetching READMEs for {embed_count} repositories...", 0, embed_count)
 
-            # Fetch READMEs in parallel
-            def readme_progress(msg, current, total):
-                self.progress.emit(msg, current, total)
+            # Fetch READMEs based on source
+            readmes = {}
 
-            readmes = self.github.fetch_readmes_parallel(
-                repos_to_embed, readme_progress, max_workers=8
-            )
+            # Group repos by source for efficient fetching
+            github_repos = [r for r in repos_to_embed if r.source == "github"]
+            hf_repos = [r for r in repos_to_embed if r.source == "huggingface"]
+            local_repos = [r for r in repos_to_embed if r.source in ("work", "forks", "docs", "local")]
+
+            # Fetch GitHub READMEs
+            if github_repos and self.config.github_pat:
+                def readme_progress(msg, current, total):
+                    self.progress.emit(msg, current, total)
+
+                try:
+                    github_service = GitHubService(
+                        self.config.github_pat,
+                        self.config.repos_base_path,
+                    )
+                    gh_readmes = github_service.fetch_readmes_parallel(
+                        github_repos, readme_progress, max_workers=8
+                    )
+                    readmes.update(gh_readmes)
+                except Exception:
+                    pass
+
+            # Fetch HF READMEs
+            if hf_repos and self.config.hf_token:
+                try:
+                    from ..services.huggingface_service import HuggingFaceService
+
+                    hf_service = HuggingFaceService(
+                        self.config.hf_token,
+                        datasets_path=self.config.hf_datasets_path,
+                        datasets_path_2=self.config.hf_datasets_path_2,
+                        models_path=self.config.hf_models_path,
+                        models_path_2=self.config.hf_models_path_2,
+                        spaces_path=self.config.hf_spaces_path,
+                        spaces_path_2=self.config.hf_spaces_path_2,
+                    )
+                    hf_readmes = hf_service.fetch_readmes_parallel(
+                        hf_repos, readme_progress, max_workers=8
+                    )
+                    readmes.update(hf_readmes)
+                except Exception:
+                    pass
+
+            # Fetch local READMEs
+            if local_repos:
+                try:
+                    from ..services.huggingface_service import LocalRepoService
+
+                    local_service = LocalRepoService("", source_name="local")
+                    local_readmes = local_service.fetch_readmes_parallel(
+                        local_repos, readme_progress, max_workers=8
+                    )
+                    readmes.update(local_readmes)
+                except Exception:
+                    pass
 
             # Update database with fetched READMEs
             for repo in repos_to_embed:
@@ -177,12 +339,36 @@ class MainWindow(QMainWindow):
         self.vector_store: Optional[VectorStore] = None
 
         self.current_worker: Optional[UpdateReposWorker] = None
+        self.health_check_worker: Optional[ApiHealthCheckWorker] = None
         self.progress_dialog: Optional[ProgressDialog] = None
         self.repositories: list[Repository] = []
 
         self._setup_ui()
         self._setup_services()
         self._restore_geometry()
+
+        # Check for first-run experience
+        self._check_first_run()
+
+        # Run API health checks on startup (after a short delay to let UI settle)
+        QTimer.singleShot(1000, self._check_api_health)
+
+    def _check_first_run(self):
+        """Check if this is the first run and show setup dialog."""
+        if not self.config_manager.is_configured():
+            # Delay showing the dialog until after the window is shown
+            QTimer.singleShot(500, self._show_first_run_dialog)
+
+    def _show_first_run_dialog(self):
+        """Show the first-run configuration dialog."""
+        QMessageBox.information(
+            self,
+            "Welcome to AI Repo Manager",
+            "Welcome! It looks like this is your first time using AI Repo Manager.\n\n"
+            "Please configure at least one repository source and your API keys "
+            "in the Settings dialog to get started.",
+        )
+        self._show_settings()
 
     def _setup_ui(self):
         """Set up the main window UI."""
@@ -269,7 +455,7 @@ class MainWindow(QMainWindow):
 
         # Update repos action
         self.update_action = QAction("Update Repos", self)
-        self.update_action.setToolTip("Sync repositories from GitHub and update embeddings")
+        self.update_action.setToolTip("Sync repositories from all sources and update embeddings")
         self.update_action.triggered.connect(self._update_repos)
         toolbar.addAction(self.update_action)
 
@@ -294,6 +480,33 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_bar)
 
+        # API health indicators (permanent widgets on the right side)
+        # Create a container for the health indicators
+        health_container = QWidget()
+        health_layout = QHBoxLayout(health_container)
+        health_layout.setContentsMargins(0, 0, 0, 0)
+        health_layout.setSpacing(12)
+
+        # GitHub indicator
+        self.github_indicator = QLabel("GitHub: ⏳")
+        self.github_indicator.setToolTip("Checking GitHub connection...")
+        self.github_indicator.setStyleSheet("color: #6b7280;")  # Gray while checking
+        health_layout.addWidget(self.github_indicator)
+
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        health_layout.addWidget(separator)
+
+        # Hugging Face indicator
+        self.hf_indicator = QLabel("HF: ⏳")
+        self.hf_indicator.setToolTip("Checking Hugging Face connection...")
+        self.hf_indicator.setStyleSheet("color: #6b7280;")  # Gray while checking
+        health_layout.addWidget(self.hf_indicator)
+
+        self.status_bar.addPermanentWidget(health_container)
+
     def _setup_services(self):
         """Initialize services based on configuration."""
         if not self.config_manager.is_configured():
@@ -304,10 +517,12 @@ class MainWindow(QMainWindow):
             # Initialize database
             self.database = Database(self.config.data_dir / "repositories.db")
 
-            self.github_service = GitHubService(
-                self.config.github_pat,
-                self.config.repos_base_path,
-            )
+            # Initialize GitHub service only if configured
+            if self.config_manager.has_github_configured():
+                self.github_service = GitHubService(
+                    self.config.github_pat,
+                    self.config.repos_base_path,
+                )
 
             self.openrouter_service = OpenRouterService(
                 self.config.openrouter_key,
@@ -352,6 +567,48 @@ class MainWindow(QMainWindow):
             if "width" in geo and "height" in geo:
                 self.resize(geo["width"], geo["height"])
 
+    def _check_api_health(self):
+        """Run API health checks in background."""
+        if self.health_check_worker and self.health_check_worker.isRunning():
+            return
+
+        self.health_check_worker = ApiHealthCheckWorker(self.config)
+        self.health_check_worker.github_status.connect(self._on_github_health)
+        self.health_check_worker.huggingface_status.connect(self._on_hf_health)
+        self.health_check_worker.start()
+
+    @pyqtSlot(bool, str)
+    def _on_github_health(self, connected: bool, message: str):
+        """Handle GitHub health check result."""
+        if connected:
+            self.github_indicator.setText("GitHub: ✓")
+            self.github_indicator.setStyleSheet("color: #22c55e;")  # Green
+            self.github_indicator.setToolTip(message)
+        elif "Not configured" in message:
+            self.github_indicator.setText("GitHub: —")
+            self.github_indicator.setStyleSheet("color: #6b7280;")  # Gray
+            self.github_indicator.setToolTip("GitHub not configured")
+        else:
+            self.github_indicator.setText("GitHub: ✗")
+            self.github_indicator.setStyleSheet("color: #ef4444;")  # Red
+            self.github_indicator.setToolTip(f"Connection failed: {message}")
+
+    @pyqtSlot(bool, str)
+    def _on_hf_health(self, connected: bool, message: str):
+        """Handle Hugging Face health check result."""
+        if connected:
+            self.hf_indicator.setText("HF: ✓")
+            self.hf_indicator.setStyleSheet("color: #22c55e;")  # Green
+            self.hf_indicator.setToolTip(message)
+        elif "Not configured" in message:
+            self.hf_indicator.setText("HF: —")
+            self.hf_indicator.setStyleSheet("color: #6b7280;")  # Gray
+            self.hf_indicator.setToolTip("Hugging Face not configured")
+        else:
+            self.hf_indicator.setText("HF: ✗")
+            self.hf_indicator.setStyleSheet("color: #ef4444;")  # Red
+            self.hf_indicator.setToolTip(f"Connection failed: {message}")
+
     def closeEvent(self, event):
         """Minimize to tray on close, save geometry."""
         # Save geometry
@@ -383,10 +640,17 @@ class MainWindow(QMainWindow):
 
     def _show_settings(self):
         """Show the settings dialog."""
-        dialog = SettingsDialog(self.config_manager, self)
+        dialog = SettingsDialog(
+            self.config_manager,
+            self,
+            database=self.database,
+            vector_store=self.vector_store,
+        )
         if dialog.exec():
             # Reinitialize services with new config
             self._setup_services()
+            # Re-check API health with new settings
+            self._check_api_health()
 
     def _update_repos(self):
         """Start the repository update process."""
@@ -404,7 +668,7 @@ class MainWindow(QMainWindow):
         # Reinitialize services to ensure fresh state
         self._setup_services()
 
-        if not all([self.github_service, self.openrouter_service, self.vector_store, self.database]):
+        if not all([self.openrouter_service, self.vector_store, self.database]):
             QMessageBox.warning(self, "Error", "Failed to initialize services.")
             return
 
@@ -416,9 +680,9 @@ class MainWindow(QMainWindow):
         # Create and show progress dialog
         self.progress_dialog = ProgressDialog(self)
 
-        # Create and start worker
+        # Create and start worker with config for multi-source sync
         self.current_worker = UpdateReposWorker(
-            self.github_service,
+            self.config,
             OpenRouterService(
                 self.config.openrouter_key,
                 self.config.embedding_model,
@@ -601,7 +865,11 @@ class MainWindow(QMainWindow):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            if self.github_service and self.github_service.delete_local_repo(repo):
+            # Use generic delete for local repos
+            import shutil
+            try:
+                shutil.rmtree(repo.local_path)
+
                 # Update database
                 if self.database:
                     self.database.update_local_path(repo.full_name, None)
@@ -614,10 +882,10 @@ class MainWindow(QMainWindow):
                 self.repositories = self.database.get_all_repositories()
                 self.repo_list.set_repositories(self.repositories)
                 self.status_label.setText(f"Deleted local copy of {repo.name}")
-            else:
-                QMessageBox.critical(self, "Error", f"Failed to delete {repo.name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete {repo.name}: {e}")
 
     def _view_on_github(self, repo: Repository):
-        """Open repository on GitHub in browser."""
+        """Open repository on GitHub/Hugging Face in browser."""
         if repo.html_url:
             webbrowser.open(repo.html_url)

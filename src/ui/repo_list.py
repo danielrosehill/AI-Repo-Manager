@@ -345,7 +345,7 @@ class ActionButtonsDelegate(QStyledItemDelegate):
 class RepositoryTableModel(QAbstractTableModel):
     """Table model for repositories."""
 
-    COLUMNS = ["Name", "Visibility", "Created", "Open"]
+    COLUMNS = ["Name", "Type", "Created", "Open"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -722,12 +722,12 @@ class RepositoryListWidget(QWidget):
 
         # Name column stretches to fill available space, others are fixed
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Name - stretches
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)    # Visibility - fixed
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)    # Type - fixed
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)    # Created date - fixed
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)    # Action buttons - fixed
 
         # Set fixed column widths for non-stretch columns
-        header.resizeSection(1, 50)    # Visibility column - icon only
+        header.resizeSection(1, 50)    # Type column - icon only
         header.resizeSection(2, 80)    # Created date column
         header.resizeSection(3, 160)   # Action buttons column (4 buttons with spacing)
 
@@ -881,18 +881,19 @@ class RepositoryListWidget(QWidget):
             self.pagination_model._emit_page_changed()
             return
 
-        # Set filter text immediately (for keyword matching while semantic loads)
-        self.filter_model.set_filter_text(text)
-        self.pagination_model.reset_page()
-        self._update_count()
-        self._update_pagination_buttons()
-        self.pagination_model._emit_page_changed()
-
-        # Use semantic search (with debounce) if available
+        # If semantic search is available, wait for it to complete before showing results
         if self._can_semantic_search():
             self._pending_semantic_query = text
             self.semantic_indicator.setText("🔍")
             self._semantic_timer.start(self.SEMANTIC_SEARCH_DELAY)
+            # Don't update filter yet - wait for semantic results
+        else:
+            # No semantic search available - use keyword search immediately
+            self.filter_model.set_filter_text(text)
+            self.pagination_model.reset_page()
+            self._update_count()
+            self._update_pagination_buttons()
+            self.pagination_model._emit_page_changed()
 
     def _on_visibility_changed(self):
         """Handle visibility filter checkbox change."""
@@ -1016,7 +1017,8 @@ class RepositoryListWidget(QWidget):
             self.semantic_indicator.setText("")
             return
 
-        # Apply semantic scores to filter model
+        # Apply filter text and semantic scores together (results appear all at once)
+        self.filter_model.set_filter_text(self._pending_semantic_query)
         self.filter_model.set_semantic_scores(scores)
         self.pagination_model.reset_page()
         self._update_count()
@@ -1027,7 +1029,13 @@ class RepositoryListWidget(QWidget):
         self.semantic_indicator.setText("")
 
     def _on_semantic_error(self, error: str):
-        """Handle semantic search error."""
-        # Silently fail - keyword search still works
+        """Handle semantic search error - fall back to keyword search."""
+        # Apply keyword-only filter as fallback
+        if self._pending_semantic_query:
+            self.filter_model.set_filter_text(self._pending_semantic_query)
+            self.pagination_model.reset_page()
+            self._update_count()
+            self._update_pagination_buttons()
+            self.pagination_model._emit_page_changed()
         self.semantic_indicator.setText("")
 

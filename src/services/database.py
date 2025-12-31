@@ -45,7 +45,9 @@ class Database:
                 readme_content TEXT,
                 last_synced TEXT,
                 embedded_at TEXT,
-                needs_embedding INTEGER NOT NULL DEFAULT 1
+                needs_embedding INTEGER NOT NULL DEFAULT 1,
+                source TEXT DEFAULT 'github',
+                source_subtype TEXT
             );
 
             CREATE TABLE IF NOT EXISTS sync_state (
@@ -55,8 +57,43 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_repos_updated ON repositories(updated_at);
             CREATE INDEX IF NOT EXISTS idx_repos_needs_embedding ON repositories(needs_embedding);
+            CREATE INDEX IF NOT EXISTS idx_repos_source ON repositories(source);
         """)
         conn.commit()
+
+        # Run migrations for existing databases
+        self._migrate_db()
+
+    def _migrate_db(self):
+        """Run database migrations for existing databases."""
+        conn = self._get_conn()
+
+        # Check existing columns
+        cursor = conn.execute("PRAGMA table_info(repositories)")
+        rows = cursor.fetchall()
+        # PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+        # Access by index since row_factory might not work for PRAGMA
+        columns = set()
+        for row in rows:
+            try:
+                columns.add(row["name"])
+            except (KeyError, TypeError):
+                # Fallback: PRAGMA returns tuples with name at index 1
+                columns.add(row[1])
+
+        if "source" not in columns:
+            try:
+                conn.execute("ALTER TABLE repositories ADD COLUMN source TEXT DEFAULT 'github'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        if "source_subtype" not in columns:
+            try:
+                conn.execute("ALTER TABLE repositories ADD COLUMN source_subtype TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def close(self):
         """Close database connection."""
@@ -209,7 +246,10 @@ class Database:
                 topics = excluded.topics,
                 local_path = COALESCE(excluded.local_path, local_path),
                 last_synced = excluded.last_synced,
-                needs_embedding = ?
+                needs_embedding = CASE
+                    WHEN excluded.pushed_at != repositories.pushed_at THEN 1
+                    ELSE repositories.needs_embedding
+                END
         """, (
             full_name,
             name,
@@ -225,7 +265,6 @@ class Database:
             local_path,
             datetime.now().isoformat(),
             needs_embedding,
-            needs_embedding,  # for the ON CONFLICT SET
         ))
         conn.commit()
 
@@ -280,9 +319,110 @@ class Database:
         row = conn.execute("SELECT COUNT(*) as count FROM repositories").fetchone()
         return row["count"]
 
+    def get_repositories_by_source(self, source: str) -> list[Repository]:
+        """Get repositories filtered by source."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM repositories WHERE source = ? ORDER BY created_at DESC",
+            (source,)
+        ).fetchall()
+        return [self._row_to_repo(row) for row in rows]
+
+    def clear_all_embeddings(self):
+        """Clear all embeddings and mark all repos as needing embedding."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE repositories SET embedded_at = NULL, needs_embedding = 1"
+        )
+        conn.commit()
+
+    def delete_repositories_by_source(self, source: str):
+        """Delete all repositories from a specific source."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM repositories WHERE source = ?", (source,))
+        conn.commit()
+
+    def upsert_local_repo(
+        self,
+        full_name: str,
+        name: str,
+        description: Optional[str],
+        local_path: str,
+        is_private: bool,
+        source: str,
+        source_subtype: Optional[str] = None,
+        topics: Optional[list[str]] = None,
+        html_url: Optional[str] = None,
+    ) -> bool:
+        """
+        Upsert repository from local filesystem scan.
+        Returns True if the repo is new (needs embedding).
+        """
+        conn = self._get_conn()
+        now = datetime.now()
+
+        # Check if repo exists
+        existing = conn.execute(
+            "SELECT full_name FROM repositories WHERE full_name = ?",
+            (full_name,)
+        ).fetchone()
+
+        needs_embedding = 1 if not existing else 0
+        topics_str = ",".join(topics) if topics else ""
+
+        conn.execute("""
+            INSERT INTO repositories (
+                full_name, name, description, created_at, updated_at, pushed_at,
+                is_private, html_url, clone_url, default_branch, topics,
+                local_path, last_synced, needs_embedding, source, source_subtype
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(full_name) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                is_private = excluded.is_private,
+                html_url = COALESCE(excluded.html_url, html_url),
+                topics = COALESCE(NULLIF(excluded.topics, ''), topics),
+                local_path = excluded.local_path,
+                last_synced = excluded.last_synced,
+                source = excluded.source,
+                source_subtype = excluded.source_subtype
+        """, (
+            full_name,
+            name,
+            description,
+            now.isoformat(),
+            now.isoformat(),
+            now.isoformat(),
+            1 if is_private else 0,
+            html_url,
+            "",  # clone_url
+            "main",
+            topics_str,
+            local_path,
+            now.isoformat(),
+            needs_embedding,
+            source,
+            source_subtype,
+        ))
+        conn.commit()
+
+        return needs_embedding == 1
+
     def _row_to_repo(self, row: sqlite3.Row) -> Repository:
         """Convert database row to Repository object."""
         topics = row["topics"].split(",") if row["topics"] else []
+
+        # Handle source column that may not exist in older databases
+        try:
+            source = row["source"] or "github"
+        except (KeyError, IndexError):
+            source = "github"
+
+        try:
+            source_subtype = row["source_subtype"]
+        except (KeyError, IndexError):
+            source_subtype = None
+
         return Repository(
             name=row["name"],
             full_name=row["full_name"],
@@ -297,4 +437,6 @@ class Database:
             is_embedded=row["embedded_at"] is not None,
             is_private=bool(row["is_private"]),
             default_branch=row["default_branch"] or "main",
+            source=source,
+            source_subtype=source_subtype,
         )
