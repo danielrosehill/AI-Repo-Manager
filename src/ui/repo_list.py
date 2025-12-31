@@ -710,6 +710,18 @@ class RepositoryListWidget(QWidget):
         # Emit initial page state
         self.pagination_model._emit_page_changed()
 
+    def set_default_view_mode(self, mode: str):
+        """Set the default view mode (all, public, private)."""
+        if mode == "public":
+            self.public_checkbox.setChecked(True)
+            self.private_checkbox.setChecked(False)
+        elif mode == "private":
+            self.public_checkbox.setChecked(False)
+            self.private_checkbox.setChecked(True)
+        else:  # "all"
+            self.public_checkbox.setChecked(True)
+            self.private_checkbox.setChecked(True)
+
     def _update_count(self):
         """Update the repository count label."""
         filtered = self.filter_model.rowCount()

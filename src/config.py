@@ -20,6 +20,9 @@ class Config:
     embedding_model: str = "google/gemini-embedding-001"
     chat_model: str = "google/gemini-2.5-flash"
 
+    # View settings
+    default_view_mode: str = "all"  # "all", "public", "private"
+
     # Window geometry (for persistence)
     window_geometry: dict = field(default_factory=dict)
 
@@ -73,6 +76,8 @@ class ConfigManager:
                 self.config.chat_model = settings["chat_model"]
             if "window_geometry" in settings:
                 self.config.window_geometry = settings["window_geometry"]
+            if "default_view_mode" in settings:
+                self.config.default_view_mode = settings["default_view_mode"]
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -88,6 +93,7 @@ class ConfigManager:
             "embedding_model": self.config.embedding_model,
             "chat_model": self.config.chat_model,
             "window_geometry": self.config.window_geometry,
+            "default_view_mode": self.config.default_view_mode,
         }
 
         self.config.config_dir.mkdir(parents=True, exist_ok=True)

@@ -94,6 +94,18 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(models_group)
 
+        # View settings group
+        view_group = QGroupBox("View Settings")
+        view_layout = QFormLayout(view_group)
+
+        self.default_view_combo = QComboBox()
+        self.default_view_combo.addItem("All Repositories", "all")
+        self.default_view_combo.addItem("Public Only", "public")
+        self.default_view_combo.addItem("Private Only", "private")
+        view_layout.addRow("Default View:", self.default_view_combo)
+
+        layout.addWidget(view_group)
+
         # Test connection buttons
         test_layout = QHBoxLayout()
 
@@ -141,6 +153,11 @@ class SettingsDialog(QDialog):
         else:
             # Custom model - show the display name
             self.chat_model_combo.setCurrentText(get_display_name(self.config.chat_model))
+
+        # Set default view mode
+        idx = self.default_view_combo.findData(self.config.default_view_mode)
+        if idx >= 0:
+            self.default_view_combo.setCurrentIndex(idx)
 
     def _browse_repos_path(self):
         """Open directory picker for repos path."""
@@ -222,6 +239,9 @@ class SettingsDialog(QDialog):
                 self.chat_model_combo.currentText(), "chat"
             )
 
+        # Get default view mode
+        default_view_mode = self.default_view_combo.currentData() or "all"
+
         # Update all config including API keys
         self.config_manager.update(
             repos_base_path=self.repos_path_edit.text(),
@@ -229,6 +249,7 @@ class SettingsDialog(QDialog):
             openrouter_key=self.openrouter_key_edit.text(),
             embedding_model=embedding_model,
             chat_model=chat_model,
+            default_view_mode=default_view_mode,
         )
 
         self.accept()

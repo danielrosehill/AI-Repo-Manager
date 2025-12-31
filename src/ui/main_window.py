@@ -320,6 +320,9 @@ class MainWindow(QMainWindow):
             # Set services on repo list for semantic search
             self.repo_list.set_services(self.openrouter_service, self.vector_store)
 
+            # Apply default view mode from settings
+            self.repo_list.set_default_view_mode(self.config.default_view_mode)
+
             # Load repositories from database
             self.repositories = self.database.get_all_repositories()
             if self.repositories:
