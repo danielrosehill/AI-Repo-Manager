@@ -1,0 +1,26 @@
+Source: ai-repo-manager
+Section: utils
+Priority: optional
+Maintainer: Daniel Rosehill <public@danielrosehill.com>
+Build-Depends: debhelper-compat (= 13), python3 (>= 3.11), python3-venv, python3-pip
+Standards-Version: 4.6.0
+Homepage: https://github.com/danielrosehill/AI-Repo-Manager
+Rules-Requires-Root: no
+
+Package: ai-repo-manager
+Architecture: all
+Depends: ${misc:Depends}, python3 (>= 3.11), python3-venv
+Description: GitHub repository manager with semantic search
+ A Linux desktop application for managing GitHub repositories with
+ semantic search powered by OpenRouter embeddings and ChromaDB.
+ .
+ Features include:
+  - Repository Management: View all your GitHub repositories
+  - Semantic Search: Find repositories using natural language
+  - AI Chat: Ask questions about your repositories using RAG
+  - Local Detection: Automatically detects locally cloned repos
+  - Quick Actions: Open in VS Code, view on GitHub, or delete
+ .
+ User data is stored in:
+  - Settings: ~/.config/ai-repo-manager/
+  - Vector Store: ~/.local/share/ai-repo-manager/

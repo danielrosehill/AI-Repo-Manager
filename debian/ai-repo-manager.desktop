@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=AI Repo Manager
+Comment=Manage GitHub repositories with semantic search
+Exec=ai-repo-manager
+Icon=ai-repo-manager
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+Keywords=github;repository;git;semantic;search;ai;
+StartupWMClass=ai-repo-manager

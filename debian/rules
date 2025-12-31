@@ -1,0 +1,40 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE=1
+export PYBUILD_NAME=ai-repo-manager
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Create virtual environment and install dependencies
+	python3 -m venv debian/venv
+	debian/venv/bin/pip install --upgrade pip
+	debian/venv/bin/pip install .
+
+override_dh_auto_install:
+	# Install application to /opt/ai-repo-manager
+	install -d $(CURDIR)/debian/ai-repo-manager/opt/ai-repo-manager
+	cp -r debian/venv/* $(CURDIR)/debian/ai-repo-manager/opt/ai-repo-manager/
+	cp -r src $(CURDIR)/debian/ai-repo-manager/opt/ai-repo-manager/
+	cp pyproject.toml $(CURDIR)/debian/ai-repo-manager/opt/ai-repo-manager/
+
+	# Install launcher script
+	install -d $(CURDIR)/debian/ai-repo-manager/usr/bin
+	install -m 755 debian/ai-repo-manager.sh $(CURDIR)/debian/ai-repo-manager/usr/bin/ai-repo-manager
+
+	# Install desktop file
+	install -d $(CURDIR)/debian/ai-repo-manager/usr/share/applications
+	install -m 644 debian/ai-repo-manager.desktop $(CURDIR)/debian/ai-repo-manager/usr/share/applications/
+
+	# Install icon
+	install -d $(CURDIR)/debian/ai-repo-manager/usr/share/icons/hicolor/scalable/apps
+	install -m 644 debian/ai-repo-manager.svg $(CURDIR)/debian/ai-repo-manager/usr/share/icons/hicolor/scalable/apps/
+
+override_dh_auto_clean:
+	rm -rf debian/venv
+	dh_auto_clean
+
+override_dh_shlibdeps:
+	# Skip shared library dependency checking for Python venv
+	true
