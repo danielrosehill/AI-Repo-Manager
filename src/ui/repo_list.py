@@ -101,10 +101,41 @@ class RepositoryTableView(QTableView):
 
 
 class VisibilityDelegate(QStyledItemDelegate):
-    """Custom delegate to render visibility as colored pills."""
+    """Custom delegate to render visibility as icons (globe for public, lock for private)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._icons: dict[str, QPixmap] = {}
+        self._load_icons()
+
+    def _load_icons(self):
+        """Load visibility icons from the icons directory."""
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        search_dir = module_dir
+        icons_dir = None
+        for _ in range(5):
+            candidate = os.path.join(search_dir, "icons")
+            if os.path.isdir(candidate):
+                icons_dir = candidate
+                break
+            parent = os.path.dirname(search_dir)
+            if parent == search_dir:
+                break
+            search_dir = parent
+
+        if not icons_dir and os.path.isdir("/opt/ai-repo-manager/icons"):
+            icons_dir = "/opt/ai-repo-manager/icons"
+
+        if not icons_dir:
+            return
+
+        for name, filename in [("public", "globe-24.png"), ("private", "lock-24.png")]:
+            icon_path = os.path.join(icons_dir, filename)
+            if os.path.exists(icon_path):
+                self._icons[name] = QPixmap(icon_path)
 
     def paint(self, painter: QPainter, option, index: QModelIndex):
-        """Paint the visibility pill."""
+        """Paint the visibility icon."""
         value = index.data(Qt.ItemDataRole.DisplayRole)
         if value not in ("Public", "Private"):
             super().paint(painter, option, index)
@@ -112,44 +143,34 @@ class VisibilityDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Colors
-        if value == "Private":
-            bg_color = QColor("#fef3c7")  # Amber/yellow background
-            text_color = QColor("#92400e")  # Dark amber text
-        else:
-            bg_color = QColor("#d1fae5")  # Green background
-            text_color = QColor("#065f46")  # Dark green text
+        icon_key = "private" if value == "Private" else "public"
+        icon_size = 20
 
-        # Calculate pill dimensions
-        text = value
-        font = painter.font()
-        font.setPointSize(11)
-        painter.setFont(font)
+        # Center the icon in the cell
+        x = option.rect.x() + (option.rect.width() - icon_size) // 2
+        y = option.rect.y() + (option.rect.height() - icon_size) // 2
+        icon_rect = QRect(x, y, icon_size, icon_size)
 
-        text_width = painter.fontMetrics().horizontalAdvance(text)
-        pill_width = text_width + 20
-        pill_height = 24
-
-        # Center the pill in the cell
-        x = option.rect.x() + (option.rect.width() - pill_width) // 2
-        y = option.rect.y() + (option.rect.height() - pill_height) // 2
-
-        pill_rect = QRect(x, y, pill_width, pill_height)
-
-        # Draw pill background
-        painter.setBrush(QBrush(bg_color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(pill_rect, 10, 10)
-
-        # Draw text
-        painter.setPen(QPen(text_color))
-        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, text)
+        if icon_key in self._icons:
+            painter.drawPixmap(icon_rect, self._icons[icon_key])
 
         painter.restore()
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(90, 36)
+        return QSize(50, 36)
+
+    def helpEvent(self, event, view, option, index):
+        """Show tooltip for visibility icon."""
+        from PyQt6.QtWidgets import QToolTip
+
+        value = index.data(Qt.ItemDataRole.DisplayRole)
+        if value in ("Public", "Private"):
+            tooltip = "Public repository" if value == "Public" else "Private repository"
+            QToolTip.showText(event.globalPos(), tooltip, view)
+            return True
+        return False
 
 
 def format_relative_date(dt: datetime) -> str:
@@ -168,14 +189,15 @@ def format_relative_date(dt: datetime) -> str:
 
 
 class ActionButtonsDelegate(QStyledItemDelegate):
-    """Custom delegate to render multiple action buttons (File Explorer, VS Code, Console, Claude Code)."""
+    """Custom delegate to render multiple action buttons (Claude Code, File Explorer, VS Code, Console)."""
 
     # Button configuration: (callback_name, icon_file, tooltip)
+    # Claude Code is first (leftmost) as the primary action
     BUTTONS = [
+        ("claude", "claude-24.png", "Open in Claude Code"),
         ("file_explorer", "folder-24.png", "Open in File Explorer"),
         ("vscode", "vsc-24.png", "Open in VS Code"),
         ("console", "terminal-24.png", "Open in Konsole"),
-        ("claude", "claude-24.png", "Open in Claude Code"),
     ]
 
     def __init__(self, parent=None):
@@ -188,9 +210,30 @@ class ActionButtonsDelegate(QStyledItemDelegate):
 
     def _load_icons(self):
         """Load icon images from the icons directory."""
-        # Find icons directory relative to this module
+        # Find icons directory - walk up from module dir looking for icons/
         module_dir = os.path.dirname(os.path.abspath(__file__))
-        icons_dir = os.path.join(os.path.dirname(os.path.dirname(module_dir)), "icons")
+
+        # Start from module dir and walk up looking for icons directory
+        # This handles: dev (src/ui -> icons), deb (/opt/ai-repo-manager/src/ui -> icons)
+        # and AppImage (usr/lib/python3/src/ui -> icons)
+        search_dir = module_dir
+        icons_dir = None
+        for _ in range(5):  # Search up to 5 levels
+            candidate = os.path.join(search_dir, "icons")
+            if os.path.isdir(candidate):
+                icons_dir = candidate
+                break
+            parent = os.path.dirname(search_dir)
+            if parent == search_dir:  # Reached root
+                break
+            search_dir = parent
+
+        # Absolute fallback
+        if not icons_dir and os.path.isdir("/opt/ai-repo-manager/icons"):
+            icons_dir = "/opt/ai-repo-manager/icons"
+
+        if not icons_dir:
+            return
 
         for callback_name, icon_file, tooltip in self.BUTTONS:
             icon_path = os.path.join(icons_dir, icon_file)
@@ -202,11 +245,11 @@ class ActionButtonsDelegate(QStyledItemDelegate):
         self._callbacks[name] = callback
 
     def _get_button_rects(self, option) -> list[QRect]:
-        """Calculate button rectangles within the cell."""
+        """Calculate button rectangles within the cell (left-aligned)."""
         btn_size = 24
-        spacing = 4
-        total_width = len(self.BUTTONS) * btn_size + (len(self.BUTTONS) - 1) * spacing
-        start_x = option.rect.x() + (option.rect.width() - total_width) // 2
+        spacing = 12  # Increased spacing to prevent misclicks
+        padding_left = 12  # Padding from left edge
+        start_x = option.rect.x() + padding_left
         y = option.rect.y() + (option.rect.height() - btn_size) // 2
 
         rects = []
@@ -254,7 +297,8 @@ class ActionButtonsDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(130, 36)
+        # 4 buttons * 24px + 3 gaps * 12px spacing + 2 * 12px padding = 96 + 36 + 24 = 156
+        return QSize(160, 36)
 
     def editorEvent(self, event, model, option, index):
         """Handle click events on buttons."""
@@ -647,7 +691,8 @@ class RepositoryListWidget(QWidget):
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         self.table_view.doubleClicked.connect(self._on_double_click)
-        self.table_view.setMouseTracking(True)  # Enable hover for VS Code button
+        self.table_view.setMouseTracking(True)  # Enable hover for button highlighting
+        self.table_view.viewport().setMouseTracking(True)  # Enable tooltips for delegates
         self.table_view.verticalHeader().setVisible(False)
 
         # Set up models: TableModel -> FilterModel -> PaginationModel
@@ -670,22 +715,21 @@ class RepositoryListWidget(QWidget):
         self.action_delegate.set_callback("claude", lambda repo: self.claude_code_requested.emit(repo))
         self.table_view.setItemDelegateForColumn(3, self.action_delegate)
 
-        # Configure header - all fixed widths for compact layout
+        # Configure header - stretch Name column, fixed widths for others
         header = self.table_view.horizontalHeader()
         header.setStretchLastSection(False)  # Don't stretch last column
         header.setMinimumSectionSize(60)  # Minimum width for any column
 
-        # Set all columns to fixed width for predictable compact layout
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)    # Name - fixed
+        # Name column stretches to fill available space, others are fixed
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Name - stretches
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)    # Visibility - fixed
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)    # Created date - fixed
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)    # Action buttons - fixed
 
-        # Set fixed column widths
-        header.resizeSection(0, 250)   # Name column - reasonable width for repo names
-        header.resizeSection(1, 80)    # Visibility column
-        header.resizeSection(2, 70)    # Created date column (relative dates are shorter)
-        header.resizeSection(3, 130)   # Action buttons column (4 buttons)
+        # Set fixed column widths for non-stretch columns
+        header.resizeSection(1, 50)    # Visibility column - icon only
+        header.resizeSection(2, 80)    # Created date column
+        header.resizeSection(3, 160)   # Action buttons column (4 buttons with spacing)
 
         header.sectionClicked.connect(self._on_header_clicked)
 

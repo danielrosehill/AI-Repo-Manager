@@ -55,6 +55,7 @@ fi
 # Copy application source
 echo "Copying application files..."
 cp -r src "$PKG_ROOT/opt/$PKG_NAME/"
+cp -r icons "$PKG_ROOT/opt/$PKG_NAME/"
 cp pyproject.toml "$PKG_ROOT/opt/$PKG_NAME/"
 cp README.md "$PKG_ROOT/opt/$PKG_NAME/" 2>/dev/null || true
 

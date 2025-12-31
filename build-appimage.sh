@@ -61,6 +61,7 @@ fi
 # Copy application source
 echo "Copying application files..."
 cp -r src "$APPDIR/usr/lib/python3/"
+cp -r icons "$APPDIR/usr/lib/python3/"
 cp pyproject.toml "$APPDIR/usr/lib/python3/"
 
 # Create AppRun script
